@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thumbwork"
+version = "0.1.0"
+description = "A phone-use agent CLI for task delegation by general agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-2.0-only"}
+dependencies = ["Pillow>=9", "requests>=2.28"]
+
+[project.scripts]
+thumbwork = "thumbwork.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+thumbwork = ["resources/*.md", "resources/*.json", "resources/smoke/*/*.md", "resources/smoke/*/*.json", "resources/smoke/*/*.png"]

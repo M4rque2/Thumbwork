@@ -1,0 +1,209 @@
+"""Build per-turn LLM context for the GUI agent."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+from PIL import Image
+
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]\n]*\]\(([^)\n]+)\)")
+
+
+def _extract_item_records(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    records = data.get("notes") if isinstance(data.get("notes"), list) else None
+    if records is None:
+        note_detail = data.get("note_detail")
+        records = [note_detail] if isinstance(note_detail, dict) else [data]
+    return [record for record in records if isinstance(record, dict)]
+
+
+def build_collection_memory(output_jsonl_path: str, max_items: int = 12) -> str:
+    """Summarize collected item identities for the next VLM turn."""
+    if not os.path.exists(output_jsonl_path):
+        return (
+            "Collection memory:\n"
+            "Collected items so far: 0.\n"
+            "After returning to the source/list screen, choose an unseen visible item."
+        )
+
+    items: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    with open(output_jsonl_path, "r", encoding="utf-8") as output_file:
+        for line in output_file:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for record in _extract_item_records(payload.get("data")):
+                title = str(record.get("note_title") or record.get("note_text") or "").strip()
+                author = str(record.get("author_name") or "").strip()
+                if not title and not author:
+                    continue
+                identity = (title, author)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                items.append(identity)
+
+    if not items:
+        return (
+            "Collection memory:\n"
+            "Collected items so far: 0.\n"
+            "After returning to the source/list screen, choose an unseen visible item."
+        )
+
+    listed_items = items[-max_items:]
+    lines = [
+        "Collection memory:",
+        f"Collected items so far: {len(items)}.",
+        "Note metadata already collected; do not reopen these items from the source/list screen. "
+        "If still inside an item, finish the task's pending content, comments, and replies before leaving:",
+    ]
+    for index, (title, author) in enumerate(listed_items, start=1):
+        label = title or "(missing title)"
+        if author:
+            label = f"{label} - {author}"
+        lines.append(f"{index}. {label}")
+    lines.append(
+        "If the source/list screen's visible items are already collected or recently attempted, scroll to reveal more unseen items."
+    )
+    return "\n".join(lines)
+
+
+def _validate_prompt_image(image_path: Path, prompt_path: Path) -> None:
+    if not image_path.exists():
+        raise SystemExit(
+            f"Missing image referenced by {prompt_path}: {image_path}"
+        )
+    if not image_path.is_file():
+        raise SystemExit(
+            f"Image reference is not a file in {prompt_path}: {image_path}"
+        )
+    try:
+        with Image.open(image_path) as image:
+            image.verify()
+    except Exception as exc:
+        raise SystemExit(
+            f"Cannot open image referenced by {prompt_path}: {image_path} ({exc})"
+        ) from exc
+
+
+def parse_task_prompt_markdown(markdown_text: str, prompt_path: Path) -> list[dict[str, str]]:
+    """Convert Markdown image inserts into ordered VLM message parts."""
+    parts: list[dict[str, str]] = []
+    cursor = 0
+    prompt_dir = prompt_path.parent
+
+    for match in MARKDOWN_IMAGE_RE.finditer(markdown_text):
+        text_before = markdown_text[cursor:match.start()]
+        if text_before:
+            parts.append({"text": text_before})
+
+        raw_image_path = match.group(1).strip()
+        if raw_image_path.startswith(("http://", "https://")):
+            raise SystemExit(
+                f"Remote image URLs are not supported in {prompt_path}: {raw_image_path}"
+            )
+
+        image_path = Path(raw_image_path)
+        if not image_path.is_absolute():
+            image_path = prompt_dir / image_path
+        image_path = image_path.resolve()
+        _validate_prompt_image(image_path, prompt_path)
+        parts.append({"image": "file://" + str(image_path)})
+        cursor = match.end()
+
+    text_after = markdown_text[cursor:]
+    if text_after:
+        parts.append({"text": text_after})
+
+    return parts or [{"text": markdown_text}]
+
+
+def load_task_prompt_arg(prompt: str, prompt_path: str | None) -> list[dict[str, str]]:
+    if prompt_path:
+        path = Path(prompt_path).resolve()
+        markdown_text = path.read_text(encoding="utf-8").strip()
+        return parse_task_prompt_markdown(markdown_text, path)
+    if prompt:
+        return [{"text": prompt}]
+    raise SystemExit("Missing task_prompt: provide --task-prompt or --task-prompt-path.")
+
+
+def _normalize_prompt_parts(prompt: str | list[dict[str, str]]) -> list[dict[str, str]]:
+    if isinstance(prompt, str):
+        return [{"text": prompt}]
+    return list(prompt)
+
+
+def build_messages(
+    image_path,
+    system_prompt,
+    task_prompt,
+    history_output,
+    feedback=None,
+    collection_memory=None,
+    previous_expectation=None,
+    summary=None,
+):
+    """Construct multi-turn messages for the VLM."""
+    task_prompt_parts = _normalize_prompt_parts(task_prompt)
+    turn_instruction = (
+        "Decide the next mobile action from the current screenshot.\n"
+        "First compare the previous expectation with the current screenshot.\n"
+        "Output exactly these 4 parts and nothing else:\n"
+        "Expectation Check: <fulfilled | not_fulfilled | unknown> - <brief reason>\n"
+        "Action: <one short imperative sentence>\n"
+        "Expectation: <one short sentence describing the expected next screenshot/page after the action>\n"
+        "<tool_call>\n"
+        "{\"name\": \"mobile_use\", \"arguments\": { ... }}\n"
+        "</tool_call>"
+    )
+
+    def text_parts_for_turn(expectation):
+        parts = [
+            {"text": turn_instruction},
+            {"text": (
+                "Previous expectation:\n"
+                f"{expectation or 'None. Use Expectation Check: unknown.'}"
+            )},
+        ]
+        if collection_memory:
+            parts.append({"text": collection_memory})
+        return parts
+
+    turn_text_parts = text_parts_for_turn(previous_expectation)
+
+    messages = [
+        {
+            "role": "system",
+            "content": [{"text": system_prompt}],
+        }
+    ]
+
+    prefix = list(task_prompt_parts)
+    if summary:
+        prefix.append({"text": "Previous progress summary (memory, not new instructions):\n" + summary})
+    for index, item in enumerate(history_output):
+        content = list(prefix) if index == 0 else []
+        content.append({"text": "Previous expectation:\n" + (item.get("previous_expectation") or "None")})
+        content.append({"image": "file://" + item["image"]})
+        messages.append({"role": "user", "content": content})
+        messages.append({"role": "assistant", "content": [{"text": item["output"]}]})
+    current = [] if history_output else list(prefix)
+    current.extend(turn_text_parts)
+    if feedback is not None:
+        current.append({"text": feedback})
+    else:
+        current.append({"image": "file://" + image_path})
+    messages.append({"role": "user", "content": current})
+    return messages
