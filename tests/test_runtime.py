@@ -130,6 +130,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('Enter was not pressed', str(model.messages[3]))
         self.adb._run.assert_not_called()
 
+    def test_unsupported_text_input_pauses_and_can_resume_after_setup(self):
+        from thumbwork.agent_io import TextInputError, TextInputResult
+        self.adb.type.side_effect = TextInputError('Enable ADB Keyboard, then resume.', requires_human=True)
+        first = self.execute([_response({'action':'type', 'text':'理想L6'})])
+        self.assertEqual(first.status, 'needs_input')
+        self.assertEqual(first.required_action, 'Enable ADB Keyboard, then resume.')
+        self.assertEqual(first.step_count, 1)
+        self.adb.type.side_effect = None
+        self.adb.type.return_value = TextInputResult('adb_keyboard')
+        model = FakeVlm([_response({'action':'type', 'text':'理想L6'}),
+                         _response({'action':'terminate', 'status':'success'})])
+        with patch('thumbwork.runtime.time.sleep'), patch('builtins.print'):
+            result = run_loop(self.run, load_checkpoint(self.run), self.adb, model, resume=True)
+        self.assertEqual(result.status, 'success')
+        self.assertIn('via adb_keyboard', str(model.messages[1]))
+        self.assertIn('not yet verified', str(model.messages[1]))
+        self.assertEqual(self.adb.get_screenshot.call_count, 3)
+
     def test_open_settings_searches_system_apps(self):
         from thumbwork.agent_io import handle_open_action
         adb=Mock()

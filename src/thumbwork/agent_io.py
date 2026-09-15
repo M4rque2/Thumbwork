@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import time
 import copy
+from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image, ImageDraw
@@ -29,7 +30,24 @@ from .app_name_to_package import resolve_package_ids
 
 
 class TextInputError(RuntimeError):
-    """Text was not entered; the agent can refocus or request human help."""
+    """Input could not complete; it may need refocusing or device setup."""
+
+    def __init__(self, message, *, requires_human=False):
+        super().__init__(message)
+        self.requires_human = requires_human
+
+
+@dataclass(frozen=True)
+class TextInputResult:
+    backend: str
+    warnings: tuple[str, ...] = ()
+
+    def feedback(self):
+        return (f'[TYPE FEEDBACK] Text input commands sent via {self.backend}; field contents are not yet verified. '
+                'Enter was not pressed. Check the exact text in the fresh screenshot before submitting. '
+                'An empty field may display a gray placeholder or suggested query. '
+                'If unchanged, refocus and retry once, then ask for human help.'
+                + ''.join(' ' + warning for warning in self.warnings))
 
 
 class AdbTools:
@@ -133,37 +151,53 @@ class AdbTools:
         )
 
     def type(self, text):
+        if not isinstance(text, str) or '\0' in text:
+            raise TextInputError('Text must be a string without NUL characters.')
+        try:
+            result = self._type_text(text)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise TextInputError('Text input could not complete because the device command failed or timed out. '
+                                 'The field may have changed partially. Check the device connection and field contents before resuming.',
+                                 requires_human=True) from exc
+        print(f'[TYPE] backend={result.backend} status=sent verification=pending')
+        return result
+
+    def _type_text(self, text):
         self._require_text_focus()
-        if self._type_with_adb_keyboard(text):
-            return
+        result = self._type_with_adb_keyboard(text)
+        if result:
+            return result
 
-        print("[WARN] ADB Keyboard input failed; falling back to clipboard paste.")
-        if self._type_with_clipboard(text):
-            return
+        result = self._type_with_clipboard(text)
+        if result:
+            return result
 
-        print("[WARN] Clipboard paste failed; falling back to adb shell input text.")
         safe_text = self._adb_input_text_safe(text)
         self._clear_with_keys()
         if text:
             self._check_text_command(self._run_args(["shell", "input", "text", safe_text]), 'Text input')
+        return TextInputResult('native_keys')
 
     def _adb_input_text_safe(self, text):
         if any(ord(char) < 32 or ord(char) > 126 for char in text) or '%s' in text:
-            raise TextInputError('Exact text input requires ADB Keyboard or a working clipboard on this device. Ask the operator to enable ADB Keyboard; text has not been transliterated or truncated.')
+            raise TextInputError('Exact text input requires ADB Keyboard or a working clipboard on this device. '
+                                 'Install and enable ADB Keyboard, then resume; text has not been transliterated or truncated.',
+                                 requires_human=True)
         return text.replace(" ", "%s")
 
     @staticmethod
     def _text_command_ok(result):
         output = result.stdout + '\n' + result.stderr
         return result.returncode == 0 and not re.search(
-            r'error:|exception|unknown command|unknown option|not found|no shell command implementation',
+            r'error:|exception|unknown command|unknown option|not found|no shell command implementation|permission denial',
             output, re.IGNORECASE)
 
-    def _check_text_command(self, result, operation):
+    def _check_text_command(self, result, operation, *, requires_human=False):
         if not self._text_command_ok(result):
-            raise TextInputError(f'{operation} failed on the device. Check the input field and keyboard, or ask the operator for help.')
+            raise TextInputError(f'{operation} failed on the device. Check the device connection, input field, and keyboard.',
+                                 requires_human=requires_human)
 
-    def _require_text_focus(self):
+    def _input_method_state(self):
         result = self._run_args(['shell', 'dumpsys', 'input_method'])
         self._check_text_command(result, 'Input focus check')
         # Restrict this to current editor sections, not historical StartInput
@@ -172,35 +206,88 @@ class AdbTools:
             r'(?:mInputEditorInfo|mCurrentTextBoxAttribute|mCurAttribute|mCurrentEditorInfo):?\s*\n?\s*inputType=(0x[0-9a-fA-F]+|\d+)',
             result.stdout)
         connections = re.findall(r'mStartedInputConnection=(\S+)', result.stdout)
+        focused = None
         if (editors and all(int(value, 0) == 0 for value in editors)) or connections == ['null']:
+            focused = False
+        elif editors or connections:
+            focused = True
+        bound = re.findall(r'\bmCur(?:MethodId|Id)=([^\s]+)', result.stdout)
+        return focused, bound
+
+    def _require_text_focus(self):
+        focused, _ = self._input_method_state()
+        if focused is False:
             raise TextInputError('No editable text field is focused. Tap the actual input field, then retry type. A search suggestion or placeholder is not entered text.')
-        if not editors and not connections:
+        if focused is None:
             print('[WARN] Device does not expose input focus diagnostics; verify the typed text in the next screenshot.')
 
+    def _require_keycombination(self):
+        if not hasattr(self, '_has_keycombination'):
+            result = self._run_args(['shell', 'input'])
+            self._check_text_command(result, 'Input capability check', requires_human=True)
+            self._has_keycombination = bool(re.search(r'^\s*keycombination(?:\s|$)', result.stdout, re.MULTILINE))
+        if not self._has_keycombination:
+            raise TextInputError('This device does not support the select-all command needed by fallback text replacement. '
+                                 'Install and enable ADB Keyboard, then resume. The field has not been cleared.',
+                                 requires_human=True)
+
+    def _supports_clipboard_commands(self):
+        if not hasattr(self, '_has_clipboard_commands'):
+            result = self._run_args(['shell', 'cmd', 'clipboard', 'help'])
+            unsupported = re.search(r'no shell command implementation|unknown command',
+                                    result.stdout + '\n' + result.stderr, re.IGNORECASE)
+            if not unsupported:
+                self._check_text_command(result, 'Clipboard capability check', requires_human=True)
+            # Only use the set/get syntax actually implemented here when the
+            # device advertises it. An absent handler can still exit with 0.
+            self._has_clipboard_commands = bool(self._text_command_ok(result)
+                and re.search(r'^\s*set\s+text\s+', result.stdout, re.MULTILINE)
+                and re.search(r'^\s*get(?:\s|$)', result.stdout, re.MULTILINE))
+        return self._has_clipboard_commands
+
     def _clear_with_keys(self):
+        self._require_keycombination()
+        self._require_text_focus()
         self._check_text_command(self._run_args(['shell', 'input', 'keycombination', 'KEYCODE_CTRL_LEFT', 'KEYCODE_A']), 'Select all text')
         self._check_text_command(self._run_args(['shell', 'input', 'keyevent', 'KEYCODE_DEL']), 'Clear text')
+
+    def _current_ime(self):
+        result = self._run_args(['shell', 'settings', 'get', 'secure', 'default_input_method'])
+        self._check_text_command(result, 'Read current keyboard')
+        return result.stdout.strip()
+
+    def _wait_for_keyboard(self, ime):
+        for attempt in range(6):
+            selected = self._current_ime()
+            focused, bound = self._input_method_state()
+            if selected == ime and focused is not False and (not bound or ime in bound):
+                return
+            if attempt < 5:
+                time.sleep(0.2)
+        raise TextInputError('ADB Keyboard did not become ready in the focused field. '
+                             'Tap the editable input field and retry once; if it persists, ask the operator to select ADB Keyboard.')
 
     def _type_with_adb_keyboard(self, text):
         adb_ime = "com.android.adbkeyboard/.AdbIME"
         ime_list = self._run_args(["shell", "ime", "list", "-a"])
-        if not self._text_command_ok(ime_list) or adb_ime not in ime_list.stdout:
+        self._check_text_command(ime_list, 'Keyboard discovery', requires_human=True)
+        if adb_ime not in ime_list.stdout:
             return False
 
-        current = self._run_args(["shell", "settings", "get", "secure", "default_input_method"])
-        self._check_text_command(current, 'Read current keyboard')
-        current_ime = current.stdout.strip()
+        current_ime = self._current_ime()
         if not current_ime or current_ime == 'null':
-            raise TextInputError('Cannot determine the current keyboard. Ask the operator to select an input method.')
+            raise TextInputError('Cannot determine the current keyboard. Select an input method in Android settings, then resume.',
+                                 requires_human=True)
         switched = current_ime != adb_ime
         enabled = self._run_args(["shell", "ime", "enable", adb_ime])
         if not self._text_command_ok(enabled):
-            return False
+            raise TextInputError('ADB Keyboard is installed but Android would not enable it. '
+                                 'Enable ADB Keyboard in Android input-method settings, then resume.', requires_human=True)
+        warnings = []
         try:
             if switched:
                 self._check_text_command(self._run_args(["shell", "ime", "set", adb_ime]), 'Switch to ADB Keyboard')
-                time.sleep(0.5)
-            self._require_text_focus()
+            self._wait_for_keyboard(adb_ime)
             self._check_text_command(self._run_args(["shell", "am", "broadcast", "-p", "com.android.adbkeyboard", "-a", "ADB_CLEAR_TEXT"]), 'Clear text')
             time.sleep(0.2)
             if text:
@@ -212,25 +299,32 @@ class AdbTools:
             if switched:
                 try:
                     restored = self._run_args(["shell", "ime", "set", current_ime])
-                    if not self._text_command_ok(restored):
-                        print('[WARN] Could not restore the original keyboard; select it in Android settings.')
-                except (OSError, subprocess.TimeoutExpired):
-                    print('[WARN] Could not restore the original keyboard; select it in Android settings.')
-        return True
+                    if not self._text_command_ok(restored) or self._current_ime() != current_ime:
+                        warnings.append('Could not restore the original keyboard; select it in Android settings.')
+                except (OSError, subprocess.TimeoutExpired, TextInputError):
+                    warnings.append('Could not restore the original keyboard; select it in Android settings.')
+                for warning in warnings:
+                    print('[WARN] ' + warning)
+        return TextInputResult('adb_keyboard', tuple(warnings))
 
     def _type_with_clipboard(self, text):
+        if not self._supports_clipboard_commands():
+            return False
+        self._require_keycombination()
         set_clipboard = self._run_args(["shell", "cmd", "clipboard", "set", "text", text])
         if not self._text_command_ok(set_clipboard):
             return False
         stored = self._run_args(['shell', 'cmd', 'clipboard', 'get'])
-        if not self._text_command_ok(stored) or stored.stdout.removesuffix('\n') != text:
+        # The requested text can itself contain words like "Error:". Compare
+        # clipboard data literally rather than treating it as command diagnostics.
+        if stored.returncode != 0 or stored.stderr.strip() or stored.stdout not in (text, text + '\n'):
             print('[WARN] Cannot verify clipboard contents; skipping paste.')
             return False
         self._clear_with_keys()
         paste = self._run_args(["shell", "input", "keyevent", "KEYCODE_PASTE"])
         self._check_text_command(paste, 'Clipboard paste')
         time.sleep(0.5)
-        return True
+        return TextInputResult('clipboard')
 
     def get_package_name(self, all_packages=False):
         try:
@@ -730,7 +824,7 @@ def handle_open_action(
 def execute_action(
     action_parameter: dict[str, Any],
     adb_tools: AdbTools,
-) -> None:
+) -> TextInputResult | None:
     """Execute one device action."""
     action_type = action_parameter["action"]
 
@@ -740,7 +834,7 @@ def execute_action(
         duration = int(float(action_parameter.get("time", 1)) * 1000)
         adb_tools.long_press(*action_parameter["coordinate"], duration=duration)
     elif action_type == "type":
-        adb_tools.type(action_parameter["text"])
+        return adb_tools.type(action_parameter["text"])
     elif action_type in ("scroll", "swipe"):
         adb_tools.slide(
             action_parameter["coordinate"][0],

@@ -85,6 +85,8 @@ Only these two actions use coordinates. All coordinates are normalized to the 0â
 Only these three actions use the `text` parameter.
 
 **`type`** â€” Replace the contents of the currently focused editable input field. Tap the field first; a search label or suggested query may not be an editable field. Empty text clears the field. This action does not press Enter or submit a search/message. Check the next screenshot for the exact text, then submit with a separate `system_button` / `Enter` action or a click on the search/submit button. Treat runtime TYPE FEEDBACK as execution feedback, not proof that the app accepted the text. If typing fails, refocus and retry once; if it still fails, use `interact` instead of repeating typing, long presses, or clearing indefinitely.
+
+When clearing, an empty field may show gray placeholder text or a suggested search query. Do not repeatedly clear a placeholder. After entering text, verify that the actual field contents match the requested text, including spaces and punctuation. A `status=sent` report confirms command delivery only; it does not confirm the app accepted the text.
 ```
 {"name": "mobile_use", "arguments": {"action": "type", "text": "your text here"}}
 ```

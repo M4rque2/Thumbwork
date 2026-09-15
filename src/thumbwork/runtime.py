@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from .agent_io import AdbTools, TextInputError, annotate_screenshot, append_extract_output, execute_action, format_turn_response, parse_turn_response, rescale_coordinates
+from .agent_io import AdbTools, TextInputError, TextInputResult, annotate_screenshot, append_extract_output, execute_action, format_turn_response, parse_turn_response, rescale_coordinates
 from .context_manager import build_collection_memory, build_messages, load_task_prompt_arg
 from .models import client_for_profile
 from .compaction import ContextManager
@@ -165,14 +165,17 @@ def run_loop(run, state, adb, vlm, *, resume=False, secret='', context_window=32
                     atomic_json(run/'checkpoint.json', scrub(state,secret))
                     continue
                 try:
-                    execute_action(scaled, adb)
+                    action_result = execute_action(scaled, adb)
                 except TextInputError as exc:
                     state['pending_feedback'] = f'[TYPE FEEDBACK] Text input failed: {exc}'
                     print(state['pending_feedback'])
+                    if exc.requires_human:
+                        return finish(run, state, 'needs_input', 'Text input requires human help', str(exc), secret)
                     atomic_json(run/'checkpoint.json', scrub(state,secret))
                     continue
                 if action == 'type':
-                    state['pending_feedback'] = '[TYPE FEEDBACK] Text input commands sent; Enter was not pressed. Verify the exact field contents in the screenshot before submitting. If unchanged, refocus and retry once, then ask for human help.'
+                    result = action_result if isinstance(action_result, TextInputResult) else TextInputResult('device input')
+                    state['pending_feedback'] = result.feedback()
                 if state['debug']:
                     annotations = run/'debug/annotations'; annotations.mkdir(exist_ok=True)
                     annotate_screenshot(str(image),scaled,str(annotations/f'action-{step}.png'))
