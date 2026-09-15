@@ -116,15 +116,18 @@ def parser():
     run.add_argument('--system-prompt-path', type=Path)
     run.add_argument('--max-steps', type=int, default=80)
     run.add_argument('--compact-threshold', type=float, default=0.70)
-    run.add_argument('--debug', action='store_true')
-    resume = commands.add_parser('resume', help='Continue a run after human intervention'); common(resume)
+    run.add_argument('--debug', action='store_true',
+                     help='Save screenshots, annotations, model traces, and logs in debug/ (off by default; can use substantial disk space)')
+    resume = commands.add_parser('resume', help='Continue a run after human intervention',
+                                 description='Continue an existing run using its saved settings, including whether --debug was enabled.'); common(resume)
     resume.add_argument('run_directory', type=Path); resume.add_argument('--max-steps', type=int)
     smoke = commands.add_parser('smoke', help='Run screenshot-only model qualification'); common(smoke)
     task_output(smoke)
     smoke.add_argument('--model', help='Model profile (uses the saved default when omitted)')
     smoke.add_argument('--task', choices=['all', 'open_weibo', 'extract_wikipedia', 'dead_phone_back'], default='all')
     smoke.add_argument('--mode', choices=['quick', 'qualify'], default='quick')
-    smoke.add_argument('--debug', action='store_true')
+    smoke.add_argument('--debug', action='store_true',
+                       help='Save model traces in debug/ (off by default; can use substantial disk space)')
     return p
 
 

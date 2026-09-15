@@ -33,7 +33,7 @@ List available tasks, then run one by its unique prompt name:
 
 ```bash
 thumbwork run
-thumbwork run xhs_search --debug
+thumbwork run xhs_search
 ```
 
 Or type a prompt directly in the terminal without creating a task file:
@@ -61,6 +61,14 @@ Store each prompt at `~/thumbwork_projects/NAME/NAME.md`, with any referenced im
 ```
 
 Run folders use the local starting datetime and timezone, plus a unique suffix. Each run keeps its own input snapshots and results. The project root can be overridden with `--projects-dir` or `THUMBWORK_PROJECTS_DIR`; saved task prompts must be in that root's `NAME/NAME.md` folder. The former `--task-name` option is removed.
+
+### Optional debug files
+
+Debug output is off by default. Use `thumbwork run NAME --debug` only when you want to retain screenshots, annotated screenshots, model request/response traces, and logs in `debug/`. These files can use substantial disk space. `smoke --debug` similarly retains model traces.
+
+Without `--debug`, no debug folder or model traces are created. Screenshots still needed for the agent's current context and checkpoint are kept in `state/`; obsolete screenshots are pruned as context is compacted. The saved prompt, extracted output, result, and checkpoint remain available.
+
+`resume` keeps the original run's debug setting. Starting a new run without `--debug` does not remove debug files from older runs. Avoid deleting screenshots referenced by an incomplete run's checkpoint if you plan to resume it.
 
 ### Text entry on the phone
 
