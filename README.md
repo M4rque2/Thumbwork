@@ -1,5 +1,87 @@
 # Thumbwork
+
+English | [简体中文](README.zh-CN.md)
+
 A complete phone-use agent, available through a CLI. Thumbwork observes screenshots, acts through taps and swipes, and asks for human help when it cannot proceed. Your coding agent handles setup, helps prepare tasks and schedule runs, and analyzes the results.
+
+## Start with the skill
+
+On a fresh computer, **install only the [thumbwork-phone-use skill](skills/thumbwork-phone-use)**. The same folder works with the local skill formats below; no Thumbwork CLI, Python, Git, Node.js, or ADB installation is required beforehand. Your coding agent must already be installed and able to run local commands on the computer that will connect to the phone.
+
+### Install in your coding agent
+
+1. Download this repository using **Code → Download ZIP** on [GitHub](https://github.com/M4rque2/Thumbwork), then extract it.
+2. Copy the entire `skills/thumbwork-phone-use` folder, including `references/`, to **one** destination for your agent in the table below. Create missing parent folders.
+3. Start a new agent session, then invoke the skill. Verify the agent can read both `SKILL.md` and its setup reference before beginning installation.
+
+`~` means your user home folder, such as `/Users/you`, `/home/you`, or `C:\Users\you`. Paths beginning with `./` belong inside the project you open in the agent.
+
+| Agent | User-wide destination | Project-only alternative | Invoke after installation |
+| --- | --- | --- | --- |
+| [Claude Code](https://code.claude.com/docs/en/skills) | `~/.claude/skills/thumbwork-phone-use/` | `./.claude/skills/thumbwork-phone-use/` | `/thumbwork-phone-use` |
+| [Codex](https://learn.chatgpt.com/docs/build-skills) | `~/.agents/skills/thumbwork-phone-use/` | `./.agents/skills/thumbwork-phone-use/` | `$thumbwork-phone-use` in CLI/IDE, or select the skill in the app |
+| [Pi](https://pi.dev/docs/latest/skills) | `~/.pi/agent/skills/thumbwork-phone-use/` | `./.pi/skills/thumbwork-phone-use/` | `/skill:thumbwork-phone-use` |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/skill/skill-filesystem/README.md) | `~/.dsh/skills/thumbwork-phone-use/` | `./.dsh/skills/thumbwork-phone-use/` | Ask it to use `thumbwork-phone-use` |
+| [WorkBuddy, local project mode](https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Project) | `~/.codebuddy/skills/thumbwork-phone-use/` | `./.codebuddy/skills/thumbwork-phone-use/` | Ask it to use `thumbwork-phone-use` |
+
+These paths follow the agents' documented discovery conventions; they are not a claim that live phone onboarding has been tested in every host. DeepSeek Harness needs its filesystem skill provider and skill tool enabled; customized/minimal presets may omit them. WorkBuddy's local configuration is compatible with [CodeBuddy skill directories](https://www.codebuddy.ai/docs/cli/skills); this is a local-folder installation, not a listing in its marketplace.
+
+Current Codex, Pi, and DeepSeek Harness also document the shared `~/.agents/skills/` location. If you use several of them on one computer, one copy there can serve all three. Avoid installing a duplicate of the same skill in both the shared and agent-specific locations. Respect custom skill-home settings when configured.
+
+The installed layout must be:
+
+```text
+<chosen-skills-directory>/thumbwork-phone-use/
+├── SKILL.md
+└── references/
+    ├── setup.md
+    └── task-iteration.md
+```
+
+Do not copy only `SKILL.md`, or nest the whole repository inside the destination. Keep an existing installation outside the skill search directory as a backup before replacing its folder.
+
+For example, from the extracted repository root, install for Claude Code on macOS/Linux:
+
+```sh
+mkdir -p "$HOME/.claude/skills"
+test ! -e "$HOME/.claude/skills/thumbwork-phone-use" && cp -R skills/thumbwork-phone-use "$HOME/.claude/skills/"
+```
+
+For Codex, replace `.claude/skills` with `.agents/skills`. The guard leaves an existing skill untouched. On Windows PowerShell, from the extracted repository root:
+
+```powershell
+$skillRoot = Join-Path $HOME '.claude/skills'
+$skillTarget = Join-Path $skillRoot 'thumbwork-phone-use'
+if (Test-Path $skillTarget) { throw 'Skill already exists; back it up before replacing it.' }
+New-Item -ItemType Directory -Force $skillRoot | Out-Null
+Copy-Item -Recurse './skills/thumbwork-phone-use' $skillTarget
+```
+
+File-manager copying works equally well and needs no terminal. In macOS Finder use **Go → Go to Folder** to enter a hidden skill directory; in Windows File Explorer enter the home-folder path in the address bar.
+
+Codex users can alternatively ask its built-in `$skill-installer` to install `skills/thumbwork-phone-use` from `M4rque2/Thumbwork`. That repository route requires the skill to be present in the downloaded/published revision; an unpublished local copy must be installed from the local folder.
+
+### Begin setup
+
+Then tell your coding agent:
+
+> Use the thumbwork-phone-use skill to set up this computer for Android phone use. Install what is missing, guide me through model configuration and connecting my phone, then help me write and test a prompt for my first task.
+
+Use a local execution session with access to the connected phone. A remote/cloud sandbox does not gain access to your computer's USB devices by installing the skill. If the agent cannot find the skill, check the exact folder layout and selected project, then restart/reload the agent. If it cannot inspect images, it can still read structured outputs, but phone screenshot validation needs a host image-viewing capability or human inspection.
+
+The agent will:
+
+1. Install the Thumbwork CLI and its Python prerequisite if missing.
+2. Ask for your model endpoint and model name, arrange private API-key entry, and verify screenshot understanding.
+3. Install ADB tools and guide you through connecting an Android phone over USB and approving debugging.
+4. Install and enable ADB Keyboard, then test actual phone text entry.
+5. Draft a reusable task prompt, run it through the CLI, inspect the results, and refine it when needed.
+
+You provide credentials, connect/unlock the phone, approve phone dialogs, and describe the result you want. The agent handles commands and prompt files. Setup is complete when the phone trial works; your task is validated separately against its requested result. Successful trials provide evidence of a working prompt, not a guarantee across future app or model changes.
+
+## CLI reference
+
+The commands below are for an installed CLI. The skill walks through installation and setup for you.
 
 Add a model interactively:
 
@@ -27,7 +109,7 @@ Use `thumbwork models path --json` for a JSON object with a `config_dir` field. 
 
 Running Thumbwork without a command, or with invalid command arguments, displays the relevant help immediately and exits with code 2. With `--json`, argument errors return a JSON object containing `status`, `reason`, and the full help text in `help`.
 
-See the [macOS quick start](QUICK_START_Non_TECH_MACOS_zh.md) for setup and task examples.
+The skill's [setup guide](skills/thumbwork-phone-use/references/setup.md) covers fresh machines; its [task iteration guide](skills/thumbwork-phone-use/references/task-iteration.md) covers writing, testing, and resuming tasks.
 
 List available tasks, then run one by its unique prompt name:
 
