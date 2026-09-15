@@ -112,6 +112,24 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0],['/path with spaces/adb','shell','input','tap','10','20'])
         self.assertNotIn('shell',run.call_args.kwargs)
 
+    def test_typing_feedback_uses_fresh_screenshot_and_allows_recovery(self):
+        from thumbwork.agent_io import TextInputError
+        self.adb.type.side_effect = [TextInputError('No editable text field is focused'), None]
+        model = FakeVlm([
+            _response({'action':'type', 'text':'Li Auto'}),
+            _response({'action':'click', 'coordinate':[250, 68]}),
+            _response({'action':'type', 'text':'Li Auto'}),
+            _response({'action':'interact', 'text':'Check the field'})])
+        with patch('thumbwork.runtime.time.sleep'), patch('builtins.print'):
+            result = run_loop(self.run, load_checkpoint(self.run), self.adb, model)
+        self.assertEqual(result.status, 'needs_input')
+        self.assertEqual(self.adb.type.call_count, 2)
+        self.adb.click.assert_called_once()
+        self.assertEqual(self.adb.get_screenshot.call_count, 4)
+        self.assertIn('No editable text field is focused', str(model.messages[1]))
+        self.assertIn('Enter was not pressed', str(model.messages[3]))
+        self.adb._run.assert_not_called()
+
     def test_open_settings_searches_system_apps(self):
         from thumbwork.agent_io import handle_open_action
         adb=Mock()

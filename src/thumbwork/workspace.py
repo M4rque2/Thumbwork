@@ -1,5 +1,6 @@
 """Task identity, immutable input snapshots and resumable run files."""
 from __future__ import annotations
+import contextlib
 import json
 import math
 import os
@@ -8,7 +9,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
-from .context_manager import MARKDOWN_IMAGE_RE, load_task_prompt_arg
+from .context_manager import MARKDOWN_IMAGE_RE, parse_task_prompt_markdown
 from .storage import atomic_json, projects_root, file_lock
 
 RESOURCE_ROOT = Path(__file__).parent / 'resources'
@@ -67,25 +68,29 @@ def available_tasks(projects_dir=None):
     return prompts
 
 
-def create_run(prompt_path, *, model, projects_dir=None,
+def create_run(prompt_path=None, *, model, prompt_text=None, projects_dir=None,
                system_prompt_path=None, max_steps=80, compact_threshold=0.70, debug=False):
     if type(max_steps) is not int or max_steps <= 0: raise ValueError('--max-steps must be positive')
     if not 0.1 <= compact_threshold <= 0.9: raise ValueError('--compact-threshold must be between 0.1 and 0.9')
-    source = resolve_task_prompt(prompt_path, projects_dir)
-    text = source.read_text(encoding='utf-8').strip()
+    if (prompt_path is None) == (prompt_text is None):
+        raise ValueError('Provide either a saved task name or --prompt TEXT')
+    source = resolve_task_prompt(prompt_path, projects_dir) if prompt_text is None else None
+    text = source.read_text(encoding='utf-8').strip() if source else prompt_text.strip()
     if not text: raise ValueError('Task prompt is empty')
+    image_base = source.parent if source else Path.cwd()
     # Validate every image before creating a persistent run directory.
-    try: load_task_prompt_arg('', str(source))
+    try: parse_task_prompt_markdown(text, source or image_base / 'task.md')
     except SystemExit as exc: raise ValueError(str(exc)) from None
     system = Path(system_prompt_path).expanduser().read_text(encoding='utf-8') if system_prompt_path else (RESOURCE_ROOT / 'system_prompt.md').read_text(encoding='utf-8')
     if not system.strip(): raise ValueError('System prompt is empty')
-    name = source.stem
-    task = source.parent
-    with file_lock(task / '.task.lock'):
-        manifest = task / 'task.json'
-        if manifest.exists() and read_json(manifest).get('source_path') != str(source):
-            raise ValueError(f'Task name {name} belongs to another prompt. Rename the prompt and its task folder to use a unique name.')
-        atomic_json(manifest, {'version': 1, 'name': name, 'source_path': str(source)})
+    name = source.stem if source else 'inline'
+    task = source.parent if source else projects_root(projects_dir)
+    with file_lock(task / '.task.lock') if source else contextlib.nullcontext():
+        if source:
+            manifest = task / 'task.json'
+            if manifest.exists() and read_json(manifest).get('source_path') != str(source):
+                raise ValueError(f'Task name {name} belongs to another prompt. Rename the prompt and its task folder to use a unique name.')
+            atomic_json(manifest, {'version': 1, 'name': name, 'source_path': str(source)})
         started = datetime.now().astimezone()
         run = task / 'runs' / (started.strftime('%Y-%m-%d_%H-%M-%S_%f%z') + '-' + uuid4().hex[:8])
         inputs = run / 'input'; inputs.mkdir(parents=True)
@@ -94,7 +99,7 @@ def create_run(prompt_path, *, model, projects_dir=None,
             def copy_image(match):
                 nonlocal count
                 original = Path(match.group(1).strip())
-                if not original.is_absolute(): original = source.parent / original
+                if not original.is_absolute(): original = image_base / original
                 target = inputs / 'assets' / f'image-{count}{original.suffix.lower()}'
                 target.parent.mkdir(exist_ok=True)
                 shutil.copyfile(original.resolve(), target)

@@ -48,7 +48,8 @@ class CommandParser(argparse.ArgumentParser):
 
 def common(parser):
     # SUPPRESS lets options work before or after subcommands without overwriting a parent value.
-    parser.add_argument('--json', action='store_true', default=argparse.SUPPRESS)
+    parser.add_argument('--json', action='store_true', default=argparse.SUPPRESS,
+                        help='Output results as JSON for scripts and AI agents')
 
 
 def task_output(parser):
@@ -98,10 +99,19 @@ def parser():
     path = sub.add_parser('path', help='Show the model configuration folder',
                           description='Print the model configuration folder without creating it. Defaults to ~/.thumbwork; advanced setups can override it with THUMBWORK_CONFIG_DIR.')
     common(path)
-    run = commands.add_parser('run', help='List available tasks or run one by name',
-                              description='Without NAME, list tasks in the projects folder. Run NAME using ~/thumbwork_projects/NAME/NAME.md. Each run saves its inputs and results in NAME/runs/<starting-datetime>/.'); common(run)
+    run = commands.add_parser('run', help='List tasks or run a saved task or terminal prompt',
+                              description='Without NAME or --prompt, list tasks in the projects folder.\n'
+                                          'Run NAME using ~/thumbwork_projects/NAME/NAME.md, or pass\n'
+                                          'instructions directly with --prompt. Saved task runs go in\n'
+                                          'NAME/runs/; terminal prompt runs go in the projects folder\'s runs/.',
+                              formatter_class=CommandExamplesFormatter,
+                              epilog='Examples:\n'
+                                     '  thumbwork run NAME\n'
+                                     '  thumbwork run --prompt "Open Google and search for Li Auto"'); common(run)
     task_output(run)
-    run.add_argument('prompt', nargs='?', type=Path, metavar='NAME', help='Task name, NAME.md, or full project prompt path; omit to list tasks')
+    prompt = run.add_mutually_exclusive_group()
+    prompt.add_argument('prompt', nargs='?', type=Path, metavar='NAME', help='Task name, NAME.md, or full project prompt path')
+    prompt.add_argument('--prompt', dest='prompt_text', metavar='TEXT', help='Run instructions typed in the terminal, without a saved task file')
     run.add_argument('--model', help='Model profile (uses the saved default when omitted)')
     run.add_argument('--system-prompt-path', type=Path)
     run.add_argument('--max-steps', type=int, default=80)
@@ -254,7 +264,9 @@ def main(argv=None):
     p = parser()
     try:
         args = p.parse_args(argv)
-        if args.command == 'run' and args.prompt is None:
+        if args.command == 'run' and args.prompt_text is not None and not args.prompt_text.strip():
+            raise CommandArgumentError('--prompt must not be empty or whitespace', p.format_help())
+        if args.command == 'run' and args.prompt is None and args.prompt_text is None:
             from .workspace import available_tasks
             root = projects_root(getattr(args, 'projects_dir', None))
             tasks = [{'name': prompt.stem, 'prompt_path': str(prompt)} for prompt in available_tasks(root)]
@@ -268,6 +280,8 @@ def main(argv=None):
             else:
                 print(f'No tasks found in {root}.')
                 print(f'Create a prompt at {root}/NAME/NAME.md, then run thumbwork run NAME.')
+            if not as_json:
+                print('Or run a terminal prompt: thumbwork run --prompt "Your instructions"')
             return 0
         if args.command == 'models' and args.model_command == 'path':
             path = str(config_root())

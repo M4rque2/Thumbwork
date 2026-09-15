@@ -38,6 +38,11 @@ class ArgumentErrorTests(unittest.TestCase):
             (['models', 'show'], ['models', 'show'], 'name'),
             (['models', 'list', '--unknown'], [], '--unknown'),
             (['run', 'task.md', '--max-steps', 'many'], ['run'], 'invalid int value'),
+            (['run', '--prompt'], ['run'], 'expected one argument'),
+            (['run', 'collect', '--prompt', 'Open Google'], ['run'], 'not allowed'),
+            (['run', '--prompt', 'Open Google', 'collect'], ['run'], 'not allowed'),
+            (['run', '--prompt', '   '], [], 'must not be empty'),
+            (['run', '--prompt', ''], [], 'must not be empty'),
             (['smoke', '--mode', 'invalid'], ['smoke'], 'invalid choice'),
         ]
         for prefix in (['smoke'], ['run', 'task.md']):
@@ -113,7 +118,7 @@ class TaskListingTests(unittest.TestCase):
             before = set(root.rglob('*'))
             with patch.dict(os.environ, {'THUMBWORK_PROJECTS_DIR': str(root)}):
                 out = self.invoke(['run'])
-                self.assertEqual(out, f'Available tasks in {root}:\n  alpha\n  zebra\n  中文任务\n\nRun a task: thumbwork run NAME\n')
+                self.assertEqual(out, f'Available tasks in {root}:\n  alpha\n  zebra\n  中文任务\n\nRun a task: thumbwork run NAME\nOr run a terminal prompt: thumbwork run --prompt "Your instructions"\n')
                 for args in (['run', '--json'], ['--json', 'run']):
                     data = json.loads(self.invoke(args))
                     self.assertEqual(data, {'projects_dir': str(root), 'tasks': [
@@ -221,6 +226,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code,0);self.assertEqual(result['context_source'],'server_reported')
         self.assertEqual(self.registry.get('office')['api_key'],'secret-test-key')
         self.assertFalse((self.prompt.parent/'runs').exists())
+    def test_terminal_prompt_runs_and_resumes_from_snapshot(self):
+        prompt = "Open Google, search for 'Li Auto', return the first 10 results.\n保留标题。"
+        output_root = self.root/'terminal-output'
+        self.registry.set_default('test')
+        pause = _response({'action':'interact','text':'Please log in'})
+        done = _response({'action':'terminate','status':'success'})
+        with patch('thumbwork.llm_client.requests.post', side_effect=[completion(pause), completion(done)]) as post, patch('thumbwork.runtime.AdbTools', return_value=self.adb):
+            code, result, _ = self.invoke(['run', '--prompt', prompt, '--projects-dir', str(output_root)])
+            self.assertEqual(code, 3)
+            run = Path(result['run_directory'])
+            self.assertEqual(run.parent, output_root/'runs')
+            self.assertEqual((run/'input/task.md').read_text(), prompt)
+            self.assertIn(prompt, json.dumps(post.call_args.kwargs['json'], ensure_ascii=False).replace('\\n', '\n'))
+            code, result, _ = self.invoke(['resume', str(run)])
+            self.assertEqual(code, 0)
+            self.assertEqual(result['step_count'], 2)
+        code, listing, _ = self.invoke(['run', '--projects-dir', str(output_root)])
+        self.assertEqual(listing['tasks'], [])
+        self.assertFalse((output_root/'task.json').exists())
+
+    def test_terminal_prompt_missing_model_creates_no_output(self):
+        output_root = self.root/'terminal-output'
+        with patch('thumbwork.runtime.AdbTools') as adb:
+            code, result, _ = self.invoke(['run', '--prompt', 'Open Google', '--model', 'missing', '--projects-dir', str(output_root)])
+        self.assertEqual(code, 2)
+        self.assertIn('Unknown model profile', result['reason'])
+        self.assertFalse(output_root.exists())
+        adb.assert_not_called()
     def test_missing_model_and_arguments_return_json_error(self):
         code,result,_=self.invoke(['run',str(self.prompt),'--model','missing'])
         self.assertEqual(code,2);self.assertEqual(result['status'],'error')

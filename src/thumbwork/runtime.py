@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from .agent_io import AdbTools, annotate_screenshot, append_extract_output, execute_action, format_turn_response, parse_turn_response, rescale_coordinates
+from .agent_io import AdbTools, TextInputError, annotate_screenshot, append_extract_output, execute_action, format_turn_response, parse_turn_response, rescale_coordinates
 from .context_manager import build_collection_memory, build_messages, load_task_prompt_arg
 from .models import client_for_profile
 from .compaction import ContextManager
@@ -95,7 +95,7 @@ def run_loop(run, state, adb, vlm, *, resume=False, secret='', context_window=32
             state['next_step'] = step + 1
             print(f'[STEP {step + 1}/{state["max_steps"]}]')
             feedback = state.get('pending_feedback')
-            if feedback is None or not state.get('last_screenshot'):
+            if not feedback or not feedback.startswith('[EXTRACT FEEDBACK]') or not state.get('last_screenshot'):
                 directory = 'debug/screenshots' if state['debug'] else 'state'
                 relative = f'{directory}/screen-{step}.png'
                 image = run / relative; image.parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +164,15 @@ def run_loop(run, state, adb, vlm, *, resume=False, secret='', context_window=32
                     print(f'[ACTION VALIDATION] {exc}')
                     atomic_json(run/'checkpoint.json', scrub(state,secret))
                     continue
-                execute_action(scaled, adb)
+                try:
+                    execute_action(scaled, adb)
+                except TextInputError as exc:
+                    state['pending_feedback'] = f'[TYPE FEEDBACK] Text input failed: {exc}'
+                    print(state['pending_feedback'])
+                    atomic_json(run/'checkpoint.json', scrub(state,secret))
+                    continue
+                if action == 'type':
+                    state['pending_feedback'] = '[TYPE FEEDBACK] Text input commands sent; Enter was not pressed. Verify the exact field contents in the screenshot before submitting. If unchanged, refocus and retry once, then ask for human help.'
                 if state['debug']:
                     annotations = run/'debug/annotations'; annotations.mkdir(exist_ok=True)
                     annotate_screenshot(str(image),scaled,str(annotations/f'action-{step}.png'))
@@ -187,6 +195,7 @@ def run_command(args, registry):
         # Validate profile before creating any project artifacts.
         registry.get(args.model)
         run = create_run(args.prompt, model=args.model,
+            prompt_text=getattr(args, 'prompt_text', None),
             projects_dir=getattr(args,'projects_dir',None), system_prompt_path=args.system_prompt_path,
             max_steps=args.max_steps, compact_threshold=args.compact_threshold, debug=args.debug)
     with file_lock(run/'.run.lock'):

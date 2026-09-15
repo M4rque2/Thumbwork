@@ -93,6 +93,27 @@ class WorkspaceTests(unittest.TestCase):
             create_run('missing',model='test',projects_dir=self.projects)
         self.assertFalse((self.projects/'missing').exists())
 
+    def test_terminal_prompt_snapshots_images_and_creates_unique_runs(self):
+        with patch('thumbwork.workspace.Path.cwd', return_value=self.prompt.parent):
+            runs = [create_run(prompt_text=self.prompt.read_text(), model='test', projects_dir=self.projects) for _ in range(2)]
+        self.assertNotEqual(*runs)
+        (self.prompt.parent/'ref.png').unlink()
+        for run in runs:
+            self.assertEqual(run.parent, self.projects/'runs')
+            self.assertEqual(load_checkpoint(run)['task_name'], 'inline')
+            parts = load_task_prompt_arg('', str(run/'input/task.md'))
+            self.assertTrue(any('image' in part for part in parts))
+
+    def test_invalid_terminal_prompt_does_not_create_output(self):
+        root = self.root/'terminal-output'
+        for text in ('', ' \n ', '![missing](missing.png)'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                create_run(prompt_text=text, model='test', projects_dir=root)
+            self.assertFalse(root.exists())
+        with self.assertRaisesRegex(ValueError, 'either'):
+            create_run(self.prompt, prompt_text='Open Google', model='test', projects_dir=root)
+        self.assertFalse(root.exists())
+
     def test_malformed_checkpoint_fails_clearly(self):
         import json
         run=self.create()
