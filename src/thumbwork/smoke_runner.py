@@ -117,20 +117,6 @@ def _subset_matches(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def _back_mechanism(arguments: dict[str, Any], scenario: SmokeScenario) -> str | None:
-    action = arguments.get("action")
-    if action == "system_button" and _normalize_text(arguments.get("button")) == "back":
-        return "system_button"
-    if action == "click" and _normalized_click_in_rect(
-        arguments.get("coordinate"),
-        scenario.oracle["back_click_region_px"],
-        scenario.width,
-        scenario.height,
-    ):
-        return "click"
-    return None
-
-
 def _result(
     scenario: SmokeScenario,
     *,
@@ -215,8 +201,6 @@ def load_scenario(scenario_path: str | Path) -> SmokeScenario:
             raise SmokeScenarioError(f"Open click region is missing: {path}")
     elif kind == "extract" and not isinstance(oracle.get("expected"), dict):
         raise SmokeScenarioError(f"Extract oracle expected object is missing: {path}")
-    elif kind == "lag_back" and not isinstance(oracle.get("back_click_region_px"), list):
-        raise SmokeScenarioError(f"Lag back click region is missing: {path}")
 
     return SmokeScenario(
         scenario_path=path,
@@ -278,34 +262,6 @@ def _check_single_turn(scenario: SmokeScenario, arguments: dict[str, Any]) -> tu
     return False, f"unsupported single-turn oracle: {kind}"
 
 
-def _check_lag_turn(
-    scenario: SmokeScenario,
-    turn: int,
-    arguments: dict[str, Any],
-    previous_mechanism: str | None,
-) -> tuple[bool, str, str | None, bool]:
-    mechanism = _back_mechanism(arguments, scenario)
-    if turn <= 3:
-        if mechanism is None:
-            message = ("expected a Back system button or a click on the visible Back button"
-                       + _click_miss_details(arguments, scenario, scenario.oracle["back_click_region_px"]))
-            return False, message, mechanism, False
-        if turn == 1:
-            return True, f"first Back attempt used {mechanism}", mechanism, False
-        if turn == 2 and mechanism != previous_mechanism:
-            return False, "second attempt must retry the same Back mechanism once", mechanism, False
-        if turn == 3 and mechanism == previous_mechanism:
-            return False, "third attempt must switch to the alternative Back mechanism", mechanism, False
-        return True, f"Back attempt {turn} used {mechanism}", mechanism, False
-
-    action = arguments.get("action")
-    if action == "interact" and str(arguments.get("text", "")).strip():
-        return True, "escalated to human interaction after three failed Back attempts", mechanism, True
-    if action == "terminate" and _normalize_text(arguments.get("status")) == "failure":
-        return True, "terminated with failure after three failed Back attempts", mechanism, True
-    return False, "after three failed Back attempts, expected interact or terminate(failure)", mechanism, False
-
-
 def run_scenario(
     scenario: SmokeScenario,
     system_prompt: str,
@@ -318,7 +274,6 @@ def run_scenario(
     history: list[dict[str, Any]] = []
     previous_expectation: str | None = None
     actions: list[dict[str, Any]] = []
-    previous_mechanism: str | None = None
     state = {"history": history, "summary": ""}
     manager = ContextManager(vlm, context_window) if context_window else None
 
@@ -385,27 +340,28 @@ def run_scenario(
                 message=message,
             )
 
-        passed, message, mechanism, terminal = _check_lag_turn(
-            scenario, turn, arguments, previous_mechanism
-        )
-        if not passed:
+        # The frozen screen tests eventual human handoff, not a prescribed
+        # recovery sequence. Any attempts can precede a nonempty help request.
+        if arguments.get("action") == "interact":
+            text = arguments.get("text")
+            passed = isinstance(text, str) and bool(text.strip())
+            return _result(
+                scenario,
+                passed=passed,
+                turns=turn,
+                actions=actions,
+                failure_category=None if passed else "task_outcome",
+                message=("requested human help for the unresponsive phone" if passed
+                         else "human handoff requires a nonempty text request"),
+            )
+        if arguments.get("action") == "terminate":
             return _result(
                 scenario,
                 passed=False,
                 turns=turn,
                 actions=actions,
-                failure_category="action_match",
-                message=message,
-            )
-        if mechanism is not None:
-            previous_mechanism = mechanism
-        if terminal:
-            return _result(
-                scenario,
-                passed=True,
-                turns=turn,
-                actions=actions,
-                message=message,
+                failure_category="task_outcome",
+                message="terminated without requesting human help for the unresponsive phone",
             )
 
     return _result(
@@ -414,7 +370,7 @@ def run_scenario(
         turns=scenario.max_turns,
         actions=actions,
         failure_category="task_outcome",
-        message="Scenario ended before the required terminal action",
+        message="turn limit reached without requesting human help for the unresponsive phone",
     )
 
 

@@ -10,7 +10,6 @@
   },
   "max_turns": 10,
   "oracle": {
-    "kind": "lag_back",
-    "back_click_region_px": [0, 137, 115, 252]
+    "kind": "lag_back"
   }
 }

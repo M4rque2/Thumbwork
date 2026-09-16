@@ -75,7 +75,6 @@ class SmokeRunnerTests(unittest.TestCase):
     def test_misplaced_click_reports_actual_position_and_target(self):
         cases = [
             ("open_weibo", [500, 51], "(540.0, 123.6)", "x=[314, 519], y=[237, 510]"),
-            ("dead_phone_back", [78, 41], "(84.2, 99.4)", "x=[0, 115], y=[137, 252]"),
         ]
         for task, coordinate, pixel, bounds in cases:
             with self.subTest(task=task):
@@ -103,7 +102,7 @@ class SmokeRunnerTests(unittest.TestCase):
         result = run_scenario(scenario, SYSTEM_PROMPT, fake)
         self.assertTrue(result["passed"])
 
-    def test_lag_requires_retry_then_alternative_then_escalation(self):
+    def test_dead_end_accepts_handoff_and_keeps_screen_frozen(self):
         scenario = load_scenario(self.paths["dead_phone_back"])
         fake = FakeVlm([
             _response({"action": "system_button", "button": "Back"}),
@@ -123,23 +122,62 @@ class SmokeRunnerTests(unittest.TestCase):
         self.assertTrue(image_paths)
         self.assertEqual(len(set(image_paths)), 1)
 
-    def test_lag_rejects_early_interact(self):
+    def test_dead_end_accepts_different_recovery_sequences(self):
         scenario = load_scenario(self.paths["dead_phone_back"])
-        fake = FakeVlm([_response({"action": "interact", "text": "Help."})])
-        result = run_scenario(scenario, SYSTEM_PROMPT, fake)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failure_category"], "action_match")
+        back = {"action": "system_button", "button": "Back"}
+        attempts = [
+            [],  # Immediate handoff is also an acceptable outcome.
+            [{"action": "click", "coordinate": [48, 80]}, back],
+            [back] * 3,
+            [
+                {"action": "click", "coordinate": [78, 41]},
+                {"action": "system_button", "button": "Home"},
+                {"action": "swipe", "coordinate": [0, 500], "coordinate2": [700, 500]},
+            ],
+            [back] * (scenario.max_turns - 1),
+        ]
+        for sequence in attempts:
+            with self.subTest(sequence=sequence):
+                actions = sequence + [{"action": "interact", "text": "Please check the phone."}]
+                fake = FakeVlm([_response(action) for action in actions])
+                result = run_scenario(scenario, SYSTEM_PROMPT, fake)
+                self.assertTrue(result["passed"])
+                self.assertIsNone(result["failure_category"])
+                self.assertEqual(result["turns"], len(actions))
+                self.assertEqual([item["arguments"] for item in result["actions"]], actions)
 
-    def test_lag_rejects_same_mechanism_on_third_attempt(self):
+    def test_dead_end_fails_at_turn_limit_without_handoff(self):
         scenario = load_scenario(self.paths["dead_phone_back"])
-        fake = FakeVlm([
-            _response({"action": "system_button", "button": "Back"}),
-            _response({"action": "system_button", "button": "Back"}),
-            _response({"action": "system_button", "button": "Back"}),
-        ])
+        fake = FakeVlm([_response({"action": "system_button", "button": "Back"})] * scenario.max_turns)
         result = run_scenario(scenario, SYSTEM_PROMPT, fake)
         self.assertFalse(result["passed"])
-        self.assertEqual(result["turns"], 3)
+        self.assertEqual(result["turns"], scenario.max_turns)
+        self.assertEqual(len(fake.messages), scenario.max_turns)
+        self.assertEqual(result["failure_category"], "task_outcome")
+
+    def test_dead_end_rejects_termination_without_handoff(self):
+        scenario = load_scenario(self.paths["dead_phone_back"])
+        for status in ("success", "failure"):
+            with self.subTest(status=status):
+                fake = FakeVlm([
+                    _response({"action": "system_button", "button": "Back"}),
+                    _response({"action": "terminate", "status": status, "summary": "Stopped."}),
+                    _response({"action": "interact", "text": "Help."}),
+                ])
+                result = run_scenario(scenario, SYSTEM_PROMPT, fake)
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["turns"], 2)
+                self.assertEqual(len(fake.messages), 2)
+                self.assertEqual(result["failure_category"], "task_outcome")
+
+    def test_dead_end_rejects_empty_or_nontext_handoff(self):
+        scenario = load_scenario(self.paths["dead_phone_back"])
+        for text in (None, "", "  ", 123):
+            with self.subTest(text=text):
+                fake = FakeVlm([_response({"action": "interact", "text": text})])
+                result = run_scenario(scenario, SYSTEM_PROMPT, fake)
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["failure_category"], "task_outcome")
 
 
 if __name__ == "__main__":

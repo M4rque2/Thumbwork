@@ -99,6 +99,8 @@ thumbwork smoke --model NAME --task all --mode quick
 
 The manual smoke test runs the three bundled screenshot scenarios without operating a phone. Its result does not prevent saving or using a model.
 
+The `dead_phone_back` scenario keeps the screenshot unchanged to simulate an unresponsive phone. It passes when the model requests human help with a nonempty `interact` message within 10 turns. Recovery actions and their order are unrestricted; ending the task with `terminate` or reaching the turn limit without asking for help fails this scenario.
+
 Model configuration is stored automatically in `~/.thumbwork`. To print the effective absolute path without creating the folder:
 
 ```bash
